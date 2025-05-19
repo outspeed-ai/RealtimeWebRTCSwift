@@ -86,6 +86,7 @@ class WebRTCManager: NSObject, ObservableObject {
                         guard let localSdp = peerConnection.localDescription?.sdp else {
                             return
                         }
+                        print("[Outspeed] Local SDP: \(localSdp)")
                         
                         // Handle connection based on provider
                         switch self.provider {
@@ -333,6 +334,8 @@ class WebRTCManager: NSObject, ObservableObject {
                           userInfo: [NSLocalizedDescriptionKey: "Unable to decode SDP"])
         }
         
+        print("[Outspeed] Received SDP from OpenAI: \(answerSdp)")
+
         return answerSdp
     }
     
