@@ -30,6 +30,9 @@ class WebRTCManager: NSObject, ObservableObject {
     // Buffer for ICE candidates when WebSocket is not ready
     private var pendingIceCandidates: [RTCIceCandidate] = []
     
+    // Flag to track if a layout update is in progress
+    private var isUpdatingUI = false
+    
     // MARK: - Public Methods
     
     /// Start a WebRTC connection using a standard API key for local testing.
@@ -116,7 +119,9 @@ class WebRTCManager: NSObject, ObservableObject {
         outspeedWebSocket?.cancel(with: .normalClosure, reason: nil)
         outspeedWebSocket = nil
         
-        connectionStatus = .disconnected
+        DispatchQueue.main.async { [weak self] in
+            self?.connectionStatus = .disconnected
+        }
     }
     
     /// Sends a custom "conversation.item.create" event
@@ -177,6 +182,7 @@ class WebRTCManager: NSObject, ObservableObject {
                 ],
                 "turn_detection": [
                     "type": "server_vad",
+                    "rms_threshold": 0.0,
                 ]
             ]
         ]
@@ -275,7 +281,8 @@ class WebRTCManager: NSObject, ObservableObject {
                 "model": "whisper-v3-turbo"
             ],
             "turn_detection": [
-                "type": "server_vad"
+                "type": "server_vad",
+                "rms_threshold": 0.0,
             ]
         ]
         
@@ -492,6 +499,13 @@ class WebRTCManager: NSObject, ObservableObject {
         
         eventTypeStr = eventType
         
+        // Set flag to batch UI updates
+        isUpdatingUI = true
+        defer { 
+            // Ensure flag is reset even if processing throws an error
+            isUpdatingUI = false
+        }
+        
         switch eventType {
         case "conversation.item.created":
             if let item = eventDict["item"] as? [String: Any],
@@ -504,7 +518,10 @@ class WebRTCManager: NSObject, ObservableObject {
                 let newItem = ConversationItem(id: itemId, role: role, text: text)
                 conversationMap[itemId] = newItem
                 if role == "assistant" || role == "user" {
-                    conversation.append(newItem)
+                    // Create a safe copy of the conversation array to prevent concurrent modification
+                    var updatedConversation = conversation
+                    updatedConversation.append(newItem)
+                    conversation = updatedConversation
                 }
             }
             
@@ -516,8 +533,12 @@ class WebRTCManager: NSObject, ObservableObject {
                 if var convItem = conversationMap[itemId] {
                     convItem.text += delta
                     conversationMap[itemId] = convItem
+                    
+                    // Safe update of the conversation array
                     if let idx = conversation.firstIndex(where: { $0.id == itemId }) {
-                        conversation[idx].text = convItem.text
+                        var updatedConversation = conversation
+                        updatedConversation[idx].text = convItem.text
+                        conversation = updatedConversation
                     }
                 }
             }
@@ -530,8 +551,12 @@ class WebRTCManager: NSObject, ObservableObject {
                 if var convItem = conversationMap[itemId] {
                     convItem.text = transcript
                     conversationMap[itemId] = convItem
+                    
+                    // Safe update of the conversation array
                     if let idx = conversation.firstIndex(where: { $0.id == itemId }) {
-                        conversation[idx].text = transcript
+                        var updatedConversation = conversation
+                        updatedConversation[idx].text = transcript
+                        conversation = updatedConversation
                     }
                 }
             }
@@ -544,8 +569,12 @@ class WebRTCManager: NSObject, ObservableObject {
                 if var convItem = conversationMap[itemId] {
                     convItem.text = transcript
                     conversationMap[itemId] = convItem
+                    
+                    // Safe update of the conversation array
                     if let idx = conversation.firstIndex(where: { $0.id == itemId }) {
-                        conversation[idx].text = transcript
+                        var updatedConversation = conversation
+                        updatedConversation[idx].text = transcript
+                        conversation = updatedConversation
                     }
                 }
             }
@@ -629,14 +658,29 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
             stateName = "checking"
         case .connected:
             stateName = "connected"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .connected
+            }
         case .completed:
             stateName = "completed"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .connected
+            }
         case .failed:
             stateName = "failed"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .disconnected
+            }
         case .disconnected:
             stateName = "disconnected"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .disconnected
+            }
         case .closed:
             stateName = "closed"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .disconnected
+            }
         case .count:
             stateName = "count"
         @unknown default:
@@ -661,7 +705,9 @@ extension WebRTCManager: RTCDataChannelDelegate {
         print("Data channel state changed: \(dataChannel.readyState)")
         // Auto-send session.update after channel is open
         if dataChannel.readyState == .open {
-            sendSessionUpdate()
+            DispatchQueue.main.async { [weak self] in
+                self?.sendSessionUpdate()
+            }
         }
     }
     
