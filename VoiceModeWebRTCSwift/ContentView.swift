@@ -1,7 +1,8 @@
 import SwiftUI
 import AVFoundation
 
-let API_KEY = ""
+let OPENAI_API_KEY = ""
+let OUTSPEED_API_KEY = ""
 
 struct ContentView: View {
     @StateObject private var webrtcManager = WebRTCManager()
@@ -10,17 +11,34 @@ struct ContentView: View {
     @FocusState private var isTextFieldFocused: Bool
     
     // AppStorage properties
-    @AppStorage("apiKey") private var apiKey = API_KEY
-    @AppStorage("systemMessage") private var systemMessage = "You are a helpful, witty, and friendly AI. Act like a human. Your voice and personality should be warm and engaging, with a lively and playful tone. Talk quickly."
-    @AppStorage("selectedModel") private var selectedModel = "gpt-4o-mini-realtime-preview-2024-12-17"
-    @AppStorage("selectedVoice") private var selectedVoice = "alloy"
+    @AppStorage("openaiApiKey") private var openaiApiKey = OPENAI_API_KEY
+    @AppStorage("outspeedApiKey") private var outspeedApiKey = OUTSPEED_API_KEY
+    @AppStorage("systemMessage") private var systemMessage = Provider.outspeed.defaultSystemMessage
+    @AppStorage("selectedModel") private var selectedModel = Provider.outspeed.defaultModel
+    @AppStorage("selectedVoice") private var selectedVoice = Provider.outspeed.defaultVoice
+    @AppStorage("selectedProvider") private var selectedProvider = Provider.outspeed.rawValue
     
-    // Constants
-    private let modelOptions = [
-        "gpt-4o-mini-realtime-preview-2024-12-17",
-        "gpt-4o-realtime-preview-2024-12-17"
-    ]
-    private let voiceOptions = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
+    // Computed properties
+    private var currentProvider: Provider {
+        Provider(rawValue: selectedProvider) ?? .openai
+    }
+    
+    private var currentApiKey: String {
+        switch currentProvider {
+        case .openai:
+            return openaiApiKey
+        case .outspeed:
+            return outspeedApiKey
+        }
+    }
+    
+    private var modelOptions: [String] {
+        currentProvider.modelOptions
+    }
+    
+    private var voiceOptions: [String] {
+        currentProvider.voiceOptions
+    }
     
     var body: some View {
         VStack(spacing: 12) {
@@ -35,10 +53,12 @@ struct ContentView: View {
         .onAppear(perform: requestMicrophonePermission)
         .sheet(isPresented: $showOptionsSheet) {
             OptionsView(
-                apiKey: $apiKey,
+                openaiApiKey: $openaiApiKey,
+                outspeedApiKey: $outspeedApiKey,
                 systemMessage: $systemMessage,
                 selectedModel: $selectedModel,
                 selectedVoice: $selectedVoice,
+                selectedProvider: $selectedProvider,
                 modelOptions: modelOptions,
                 voiceOptions: voiceOptions
             )
@@ -49,7 +69,7 @@ struct ContentView: View {
         AVAudioSession.sharedInstance().requestRecordPermission { granted in
             print("Microphone permission granted: \(granted)")
         }
-        if apiKey.isEmpty {
+        if currentApiKey.isEmpty {
             showOptionsSheet = true
         }
     }
@@ -104,10 +124,11 @@ struct ContentView: View {
                     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                     webrtcManager.connectionStatus = .connecting
                     webrtcManager.startConnection(
-                        apiKey: apiKey,
+                        apiKey: currentApiKey,
                         modelName: selectedModel,
                         systemMessage: systemMessage,
-                        voice: selectedVoice
+                        voice: selectedVoice,
+                        provider: currentProvider
                     )
                 }
                 .buttonStyle(.borderedProminent)
@@ -188,10 +209,12 @@ struct ContentView: View {
 }
 
 struct OptionsView: View {
-    @Binding var apiKey: String
+    @Binding var openaiApiKey: String
+    @Binding var outspeedApiKey: String
     @Binding var systemMessage: String
     @Binding var selectedModel: String
     @Binding var selectedVoice: String
+    @Binding var selectedProvider: String
     
     let modelOptions: [String]
     let voiceOptions: [String]
@@ -201,15 +224,27 @@ struct OptionsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("API Key")) {
-                    TextField("Enter API Key", text: $apiKey)
+                Section(header: Text("Provider")) {
+                    Picker("Provider", selection: $selectedProvider) {
+                        Text("OpenAI").tag(Provider.openai.rawValue)
+                        Text("Outspeed").tag(Provider.outspeed.rawValue)
+                    }
+                    .pickerStyle(.segmented)
+                }
+                
+                Section(header: Text("API Keys")) {
+                    TextField("OpenAI API Key", text: $openaiApiKey)
+                        .autocapitalization(.none)
+                    TextField("Outspeed API Key", text: $outspeedApiKey)
                         .autocapitalization(.none)
                 }
+                
                 Section(header: Text("System Message")) {
                     TextEditor(text: $systemMessage)
                         .frame(minHeight: 100)
                         .cornerRadius(5)
                 }
+                
                 Section(header: Text("Model")) {
                     Picker("Model", selection: $selectedModel) {
                         ForEach(modelOptions, id: \.self) {
@@ -218,6 +253,7 @@ struct OptionsView: View {
                     }
                     .pickerStyle(.menu)
                 }
+                
                 Section(header: Text("Voice")) {
                     Picker("Voice", selection: $selectedVoice) {
                         ForEach(voiceOptions, id: \.self) {

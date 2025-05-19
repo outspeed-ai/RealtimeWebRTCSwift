@@ -10,13 +10,14 @@ class WebRTCManager: NSObject, ObservableObject {
     @Published var conversation: [ConversationItem] = []
     @Published var outgoingMessage: String = ""
     
-    // We’ll store items by item_id for easy updates
+    // We'll store items by item_id for easy updates
     private var conversationMap: [String : ConversationItem] = [:]
     
     // Model & session config
     private var modelName: String = "gpt-4o-mini-realtime-preview-2024-12-17"
     private var systemInstructions: String = ""
     private var voice: String = "alloy"
+    private var provider: Provider = .openai
     
     // WebRTC references
     private var peerConnection: RTCPeerConnection?
@@ -30,7 +31,8 @@ class WebRTCManager: NSObject, ObservableObject {
         apiKey: String,
         modelName: String,
         systemMessage: String,
-        voice: String
+        voice: String,
+        provider: Provider = .openai
     ) {
         conversation.removeAll()
         conversationMap.removeAll()
@@ -39,6 +41,7 @@ class WebRTCManager: NSObject, ObservableObject {
         self.modelName = modelName
         self.systemInstructions = systemMessage
         self.voice = voice
+        self.provider = provider
         
         setupPeerConnection()
         setupLocalAudio()
@@ -77,23 +80,20 @@ class WebRTCManager: NSObject, ObservableObject {
                         guard let localSdp = peerConnection.localDescription?.sdp else {
                             return
                         }
-                        // Post SDP offer to Realtime
-                        let answerSdp = try await self.fetchRemoteSDP(apiKey: apiKey, localSdp: localSdp)
                         
-                        // Set remote description (answer)
-                        let answer = RTCSessionDescription(type: .answer, sdp: answerSdp)
-                        peerConnection.setRemoteDescription(answer) { error in
-                            DispatchQueue.main.async {
-                                if let error {
-                                    print("Failed to set remote description: \(error)")
-                                    self.connectionStatus = .disconnected
-                                } else {
-                                    self.connectionStatus = .connected
-                                }
-                            }
+                        // Handle connection based on provider
+                        switch self.provider {
+                        case .openai:
+                            let answerSdp = try await self.fetchRemoteSDPOpenAI(apiKey: apiKey, localSdp: localSdp)
+                            await self.setRemoteDescription(answerSdp)
+                        case .outspeed:
+                            // First get ephemeral key
+                            let ephemeralKey = try await self.getEphemeralKeyOutspeed(apiKey: apiKey)
+                            // Then establish WebRTC connection
+                            try await self.fetchRemoteSDPOutspeed(ephemeralKey: ephemeralKey, localSdp: localSdp)
                         }
                     } catch {
-                        print("Error fetching remote SDP: \(error)")
+                        print("Error in connection process: \(error)")
                         self.connectionStatus = .disconnected
                     }
                 }
@@ -162,19 +162,12 @@ class WebRTCManager: NSObject, ObservableObject {
                 "modalities": ["text", "audio"],  // Enable both text and audio
                 "instructions": systemInstructions,
                 "voice": voice,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
                 "input_audio_transcription": [
-                    "model": "whisper-1"
+                    "model": provider == .openai ? "whisper-1" : "whisper-v3-turbo"
                 ],
                 "turn_detection": [
                     "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500,
-                    "create_response": true
-                ],
-                "max_response_output_tokens": "inf"
+                ]
             ]
         ]
         
@@ -230,9 +223,80 @@ class WebRTCManager: NSObject, ObservableObject {
         audioTrack = localAudioTrack
     }
     
-    /// Posts our SDP offer to the Realtime API, returns the answer SDP.
-    private func fetchRemoteSDP(apiKey: String, localSdp: String) async throws -> String {
-        let baseUrl = "https://api.openai.com/v1/realtime"
+    private func setRemoteDescription(_ sdp: String) async {
+        let answer = RTCSessionDescription(type: .answer, sdp: sdp)
+        peerConnection?.setRemoteDescription(answer) { [weak self] error in
+            DispatchQueue.main.async {
+                if let error {
+                    print("Failed to set remote description: \(error)")
+                    self?.connectionStatus = .disconnected
+                } else {
+                    self?.connectionStatus = .connected
+                }
+            }
+        }
+    }
+    
+    /// Get ephemeral key from Outspeed server
+    private func getEphemeralKeyOutspeed(apiKey: String) async throws -> String {
+        let baseUrl = "https://\(provider.baseURL)/v1/realtime/sessions"
+        guard let url = URL(string: baseUrl) else {
+            throw URLError(.badURL)
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        // Create session configuration
+        let sessionConfig: [String: Any] = [
+            "model": modelName,
+            "modalities": ["text", "audio"],
+            "instructions": systemInstructions,
+            "voice": voice,
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "input_audio_transcription": [
+                "model": "whisper-v3-turbo"
+            ],
+            "turn_detection": [
+                "type": "server_vad"
+            ]
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: sessionConfig)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        // Log the raw server response
+        if let responseString = String(data: data, encoding: .utf8) {
+            print("[Outspeed] getEphemeralKeyOutspeed server response: \(responseString)")
+        }
+        
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw NSError(domain: "WebRTCManager.getEphemeralKeyOutspeed",
+                          code: code,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
+        }
+        
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let clientSecret = json["client_secret"] as? [String: Any],
+              let value = clientSecret["value"] as? String else {
+            throw NSError(domain: "WebRTCManager.getEphemeralKeyOutspeed",
+                          code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid response format"])
+        }
+        
+        print("[Outspeed] Received clientSecret: \(value)")
+        return value
+    }
+    
+    /// Handle OpenAI SDP exchange
+    private func fetchRemoteSDPOpenAI(apiKey: String, localSdp: String) async throws -> String {
+        let baseUrl = "https://\(provider.baseURL)/v1/realtime"
         guard let url = URL(string: "\(baseUrl)?model=\(modelName)") else {
             throw URLError(.badURL)
         }
@@ -247,18 +311,144 @@ class WebRTCManager: NSObject, ObservableObject {
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "WebRTCManager.fetchRemoteSDP",
+            throw NSError(domain: "WebRTCManager.fetchRemoteSDPOpenAI",
                           code: code,
                           userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
         }
         
         guard let answerSdp = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "WebRTCManager.fetchRemoteSDP",
+            throw NSError(domain: "WebRTCManager.fetchRemoteSDPOpenAI",
                           code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "Unable to decode SDP"])
         }
         
         return answerSdp
+    }
+    
+    /// Handle Outspeed WebSocket-based SDP exchange
+    private func fetchRemoteSDPOutspeed(ephemeralKey: String, localSdp: String) async throws {
+        let wsUrl = "wss://\(provider.baseURL)/v1/realtime/ws?client_secret=\(ephemeralKey)&model=\(modelName)"
+        guard let url = URL(string: wsUrl) else {
+            throw URLError(.badURL)
+        }
+
+        print("[Outspeed] Connecting to WebSocket URL: \(wsUrl)")
+
+        let webSocket = URLSession.shared.webSocketTask(with: url)
+        print("[Outspeed] WebSocket connection initiated")
+        webSocket.resume() // Starts the asynchronous connection process
+        
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            
+            func receiveMessage() {
+                webSocket.receive { [weak self] result in
+                    guard let self = self else {
+                        print("[Outspeed][WebSocket] Self is nil, aborting receiveMessage.")
+                        continuation.resume(throwing: NSError(domain: "WebRTCManager.fetchRemoteSDPOutspeed", code: -2, userInfo: [NSLocalizedDescriptionKey: "WebRTCManager deallocated during WebSocket operation"]))
+                        return
+                    }
+
+                    switch result {
+                    case .success(let message):
+                        switch message {
+                        case .string(let text):
+                            print("[Outspeed][WebSocket] Received string: \(text)")
+                            guard let data = text.data(using: .utf8),
+                                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                                  let type = json["type"] as? String else {
+                                print("[Outspeed][WebSocket] Failed to parse received JSON string.")
+                                receiveMessage() 
+                                return
+                            }
+
+                            switch type {
+                            case "pong":
+                                print("[Outspeed][WebSocket] Pong received. Sending offer...")
+                                let offerMessagePayload = ["type": "offer", "sdp": localSdp]
+                                guard let offerData = try? JSONSerialization.data(withJSONObject: offerMessagePayload),
+                                      let offerString = String(data: offerData, encoding: .utf8) else {
+                                    continuation.resume(throwing: NSError(domain: "WebRTCManager.fetchRemoteSDPOutspeed", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to serialize offer message to string"]))
+                                    return
+                                }
+                                webSocket.send(.string(offerString)) { error in
+                                    if let error {
+                                        print("[Outspeed][WebSocket] Failed to send offer: \(error)")
+                                        continuation.resume(throwing: error)
+                                    } else {
+                                        print("[Outspeed][WebSocket] Offer sent. Waiting for answer...")
+                                        receiveMessage() 
+                                    }
+                                }
+                            case "answer":
+                                print("[Outspeed][WebSocket] Answer received.")
+                                if let sdp = json["sdp"] as? String {
+                                    Task {
+                                        await self.setRemoteDescription(sdp)
+                                        continuation.resume() 
+                                    }
+                                } else {
+                                    continuation.resume(throwing: NSError(domain: "WebRTCManager.fetchRemoteSDPOutspeed", code: -1, userInfo: [NSLocalizedDescriptionKey: "Answer message missing SDP"]))
+                                }
+                            case "candidate":
+                                print("[Outspeed][WebSocket] Candidate received.")
+                                if let candidateString = json["candidate"] as? String,
+                                   let sdpMid = json["sdpMid"] as? String,
+                                   let sdpMLineIndex = json["sdpMLineIndex"] as? Int {
+                                    let iceCandidate = RTCIceCandidate(
+                                        sdp: candidateString,
+                                        sdpMLineIndex: Int32(sdpMLineIndex),
+                                        sdpMid: sdpMid
+                                    )
+                                    self.peerConnection?.add(iceCandidate)
+                                    receiveMessage() 
+                                } else {
+                                    print("[Outspeed][WebSocket] Malformed candidate received.")
+                                    receiveMessage() 
+                                }
+                            case "error": 
+                                let errorMessage = json["message"] as? String ?? "Unknown server error"
+                                print("[Outspeed][WebSocket] Server error message: \(errorMessage)")
+                                continuation.resume(throwing: NSError(
+                                    domain: "WebRTCManager.fetchRemoteSDPOutspeed.ServerError",
+                                    code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: errorMessage]
+                                ))
+                            default:
+                                print("[Outspeed][WebSocket] Unknown message type received: \(type)")
+                                receiveMessage() 
+                            }
+                        case .data(let data):
+                            print("[Outspeed][WebSocket] Received binary data (unexpected): \(data as NSData)")
+                            receiveMessage() 
+                        @unknown default:
+                            print("[Outspeed][WebSocket] Unknown message format received.")
+                            receiveMessage() 
+                        }
+                    case .failure(let error):
+                        print("[Outspeed][WebSocket] Receive operation failed: \(error)")
+                        continuation.resume(throwing: error)
+                    }
+                }
+            } 
+
+            let pingMessagePayload = ["type": "ping"]
+            guard let pingData = try? JSONSerialization.data(withJSONObject: pingMessagePayload),
+                  let pingString = String(data: pingData, encoding: .utf8) else {
+                continuation.resume(throwing: NSError(domain: "WebRTCManager.fetchRemoteSDPOutspeed", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to serialize ping message to string"]))
+                return
+            }
+            
+            print("[Outspeed][WebSocket] Sending initial ping as string: \(pingString)")
+            webSocket.send(.string(pingString)) { error in
+                if let error {
+                    print("[Outspeed][WebSocket] Failed to send initial ping: \(error)")
+                    continuation.resume(throwing: error)
+                } else {
+                    print("[Outspeed][WebSocket] Initial ping sent successfully. Waiting for pong...")
+                    receiveMessage()
+                }
+            }
+        }
     }
     
     private func handleIncomingJSON(_ jsonString: String) {
@@ -290,7 +480,7 @@ class WebRTCManager: NSObject, ObservableObject {
             }
             
         case "response.audio_transcript.delta":
-            // partial transcript for assistant’s message
+            // partial transcript for assistant's message
             if let itemId = eventDict["item_id"] as? String,
                let delta = eventDict["delta"] as? String
             {
@@ -304,7 +494,7 @@ class WebRTCManager: NSObject, ObservableObject {
             }
             
         case "response.audio_transcript.done":
-            // final transcript for assistant’s message
+            // final transcript for assistant's message
             if let itemId = eventDict["item_id"] as? String,
                let transcript = eventDict["transcript"] as? String
             {
