@@ -171,21 +171,41 @@ class WebRTCManager: NSObject, ObservableObject {
             return
         }
         
-        let sessionUpdate: [String: Any] = [
-            "type": "session.update",
-            "session": [
-                "modalities": ["text", "audio"],  // Enable both text and audio
-                "instructions": systemInstructions,
-                "voice": voice,
-                "input_audio_transcription": [
-                    "model": provider == .openai ? "whisper-1" : "whisper-v3-turbo"
-                ],
-                "turn_detection": [
-                    "type": "server_vad",
-                    "rms_threshold": 0.0,
+        // Declare sessionUpdate outside of conditional blocks
+        let sessionUpdate: [String: Any]
+        
+        if provider == .outspeed {
+            sessionUpdate = [
+                "type": "session.update",
+                "session": [
+                    "modalities": ["text", "audio"],  // Enable both text and audio
+                    "instructions": systemInstructions,
+                    "voice": voice,
+                    "input_audio_transcription": [
+                        "model": provider == .openai ? "whisper-1" : "whisper-v3-turbo"
+                    ],
+                    "turn_detection": [
+                        "type": "server_vad",
+                        "rms_threshold": 0.0,
+                    ]
                 ]
             ]
-        ]
+        } else {
+            sessionUpdate = [
+                "type": "session.update",
+                "session": [
+                    "modalities": ["text", "audio"],  // Enable both text and audio
+                    "instructions": systemInstructions,
+                    "voice": voice,
+                    "input_audio_transcription": [
+                        "model": provider == .openai ? "whisper-1" : "whisper-v3-turbo"
+                    ],
+                    "turn_detection": [
+                        "type": "server_vad",
+                    ]
+                ]
+            ]
+        }
         
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: sessionUpdate)
@@ -215,7 +235,7 @@ class WebRTCManager: NSObject, ObservableObject {
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetooth])
-            try audioSession.setMode(.videoChat)
+            try audioSession.setMode(.voiceChat)  // Changed from videoChat to voiceChat for better voice optimization
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("Failed to configure AVAudioSession: \(error)")
@@ -231,7 +251,7 @@ class WebRTCManager: NSObject, ObservableObject {
                 "googEchoCancellation": "true",
                 "googAutoGainControl": "true",
                 "googNoiseSuppression": "true",
-                "googHighpassFilter": "true"
+                "googHighpassFilter": "true",
             ],
             optionalConstraints: nil
         )
@@ -269,23 +289,40 @@ class WebRTCManager: NSObject, ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         
-        // Create session configuration
-        let sessionConfig: [String: Any] = [
-            "model": modelName,
-            "modalities": ["text", "audio"],
-            "instructions": systemInstructions,
-            "voice": voice,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": [
-                "model": "whisper-v3-turbo"
-            ],
-            "turn_detection": [
-                "type": "server_vad",
-                "rms_threshold": 0.0,
+        let sessionConfig: [String: Any]
+        if provider == .outspeed {
+            // Create session configuration
+            sessionConfig = [
+                "model": modelName,
+                "modalities": ["text", "audio"],
+                "instructions": systemInstructions,
+                "voice": voice,
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": [
+                    "model": "whisper-v3-turbo"
+                ],
+                "turn_detection": [
+                    "type": "server_vad",
+                    "rms_threshold": 0.0,
+                ]
             ]
-        ]
-        
+        } else {
+            sessionConfig = [
+                "model": modelName,
+                "modalities": ["text", "audio"],
+                "instructions": systemInstructions,
+                "voice": voice,
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": [
+                    "model": "whisper-v3-turbo"
+                ],
+                "turn_detection": [
+                    "type": "server_vad",
+                ]
+            ]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: sessionConfig)
         
         let (data, response) = try await URLSession.shared.data(for: request)
