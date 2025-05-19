@@ -24,6 +24,12 @@ class WebRTCManager: NSObject, ObservableObject {
     private var dataChannel: RTCDataChannel?
     private var audioTrack: RTCAudioTrack?
     
+    // Outspeed WebSocket reference
+    private var outspeedWebSocket: URLSessionWebSocketTask?
+    
+    // Buffer for ICE candidates when WebSocket is not ready
+    private var pendingIceCandidates: [RTCIceCandidate] = []
+    
     // MARK: - Public Methods
     
     /// Start a WebRTC connection using a standard API key for local testing.
@@ -106,6 +112,11 @@ class WebRTCManager: NSObject, ObservableObject {
         peerConnection = nil
         dataChannel = nil
         audioTrack = nil
+        
+        // Cancel any active WebSocket
+        outspeedWebSocket?.cancel(with: .normalClosure, reason: nil)
+        outspeedWebSocket = nil
+        
         connectionStatus = .disconnected
     }
     
@@ -335,6 +346,10 @@ class WebRTCManager: NSObject, ObservableObject {
         print("[Outspeed] Connecting to WebSocket URL: \(wsUrl)")
 
         let webSocket = URLSession.shared.webSocketTask(with: url)
+        // Store WebSocket reference for ICE candidate sending
+        self.outspeedWebSocket = webSocket
+        // Clear any pending candidates from previous connection attempts
+        
         print("[Outspeed] WebSocket connection initiated")
         webSocket.resume() // Starts the asynchronous connection process
         
@@ -384,6 +399,10 @@ class WebRTCManager: NSObject, ObservableObject {
                                 if let sdp = json["sdp"] as? String {
                                     Task {
                                         await self.setRemoteDescription(sdp)
+                                        
+                                        // Send any pending ICE candidates after answer is received
+                                        self.sendPendingIceCandidates()
+                                        
                                         continuation.resume() 
                                     }
                                 } else {
@@ -525,6 +544,63 @@ class WebRTCManager: NSObject, ObservableObject {
             break
         }
     }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        print("[Outspeed] didGenerate candidate: \(candidate.sdp)")
+        if provider == .outspeed {
+            if let webSocket = outspeedWebSocket, webSocket.state == .running {
+                sendIceCandidate(candidate)
+            } else {
+                // Buffer the candidate for later
+                print("[Outspeed] WebSocket not ready, buffering ICE candidate")
+                pendingIceCandidates.append(candidate)
+            }
+        }
+    }
+    
+    // Helper method to send a single ICE candidate
+    private func sendIceCandidate(_ candidate: RTCIceCandidate) {
+        guard let webSocket = outspeedWebSocket, webSocket.state == .running else {
+            print("[Outspeed] WebSocket not available, cannot send ICE candidate")
+            return
+        }
+        
+        // Format the ICE candidate message
+        let candidateMessage: [String: Any] = [
+            "type": "candidate",
+            "candidate": candidate.sdp,
+            "sdpMid": candidate.sdpMid ?? "",
+            "sdpMLineIndex": Int(candidate.sdpMLineIndex)
+        ]
+        
+        // Send to the WebSocket server
+        guard let candidateData = try? JSONSerialization.data(withJSONObject: candidateMessage),
+              let candidateString = String(data: candidateData, encoding: .utf8) else {
+            print("[Outspeed] Failed to serialize ICE candidate")
+            return
+        }
+        
+        print("[Outspeed] Sending ICE candidate: \(candidateString)")
+        webSocket.send(.string(candidateString)) { error in
+            if let error {
+                print("[Outspeed] Failed to send ICE candidate: \(error)")
+            }
+        }
+    }
+    
+    // Helper method to send all pending ICE candidates
+    private func sendPendingIceCandidates() {
+        print("[Outspeed] Sending \(pendingIceCandidates.count) buffered ICE candidates")
+        guard !pendingIceCandidates.isEmpty else {
+            return
+        }
+        
+        print("[Outspeed] Sending \(pendingIceCandidates.count) buffered ICE candidates")
+        for candidate in pendingIceCandidates {
+            sendIceCandidate(candidate)
+        }
+        pendingIceCandidates.removeAll()
+    }
 }
 
 // MARK: - RTCPeerConnectionDelegate
@@ -560,7 +636,7 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     }
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
+    
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
