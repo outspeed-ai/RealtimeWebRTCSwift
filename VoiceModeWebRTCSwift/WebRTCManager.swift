@@ -535,7 +535,28 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        print("ICE Connection State changed to: \(newState)")
+        let stateName: String
+        switch newState {
+        case .new:
+            stateName = "new"
+        case .checking:
+            stateName = "checking"
+        case .connected:
+            stateName = "connected"
+        case .completed:
+            stateName = "completed"
+        case .failed:
+            stateName = "failed"
+        case .disconnected:
+            stateName = "disconnected"
+        case .closed:
+            stateName = "closed"
+        case .count:
+            stateName = "count"
+        @unknown default:
+            stateName = "unknown"
+        }
+        print("ICE Connection State changed to: \(stateName)")
     }
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
