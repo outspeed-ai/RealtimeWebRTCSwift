@@ -195,7 +195,11 @@ class WebRTCManager: NSObject, ObservableObject {
     
     private func setupPeerConnection() {
         let config = RTCConfiguration()
-        // If needed, configure ICE servers here
+        // Configure ICE servers with public STUN servers
+        config.iceServers = [
+            RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urlStrings: ["stun:stun1.l.google.com:19302"])
+        ]
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         let factory = RTCPeerConnectionFactory()
         peerConnection = factory.peerConnection(with: config, constraints: constraints, delegate: self)
