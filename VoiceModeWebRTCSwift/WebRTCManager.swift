@@ -85,9 +85,7 @@ class WebRTCManager: NSObject, ObservableObject {
                     do {
                         guard let localSdp = peerConnection.localDescription?.sdp else {
                             return
-                        }
-                        print("[Outspeed] Local SDP: \(localSdp)")
-                        
+                        }                        
                         // Handle connection based on provider
                         switch self.provider {
                         case .openai:
@@ -317,6 +315,7 @@ class WebRTCManager: NSObject, ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/sdp", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        print("[Outspeed] Sending SDP to OpenAI: \(localSdp)")
         request.httpBody = localSdp.data(using: .utf8)
         
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -421,7 +420,11 @@ class WebRTCManager: NSObject, ObservableObject {
                                         sdpMLineIndex: Int32(sdpMLineIndex),
                                         sdpMid: sdpMid
                                     )
-                                    self.peerConnection?.add(iceCandidate)
+                                    self.peerConnection?.add(iceCandidate) { error in
+                                        if let error = error {
+                                            print("[Outspeed][WebSocket] Failed to add ICE candidate: \(error)")
+                                        }
+                                    }
                                     receiveMessage() 
                                 } else {
                                     print("[Outspeed][WebSocket] Malformed candidate received.")
