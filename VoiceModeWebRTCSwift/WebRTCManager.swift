@@ -24,6 +24,15 @@ class WebRTCManager: NSObject, ObservableObject {
     private var dataChannel: RTCDataChannel?
     private var audioTrack: RTCAudioTrack?
     
+    // Outspeed WebSocket reference
+    private var outspeedWebSocket: URLSessionWebSocketTask?
+    
+    // Buffer for ICE candidates when WebSocket is not ready
+    private var pendingIceCandidates: [RTCIceCandidate] = []
+    
+    // Flag to track if a layout update is in progress
+    private var isUpdatingUI = false
+    
     // MARK: - Public Methods
     
     /// Start a WebRTC connection using a standard API key for local testing.
@@ -79,8 +88,7 @@ class WebRTCManager: NSObject, ObservableObject {
                     do {
                         guard let localSdp = peerConnection.localDescription?.sdp else {
                             return
-                        }
-                        
+                        }                        
                         // Handle connection based on provider
                         switch self.provider {
                         case .openai:
@@ -106,7 +114,14 @@ class WebRTCManager: NSObject, ObservableObject {
         peerConnection = nil
         dataChannel = nil
         audioTrack = nil
-        connectionStatus = .disconnected
+        
+        // Cancel any active WebSocket
+        outspeedWebSocket?.cancel(with: .normalClosure, reason: nil)
+        outspeedWebSocket = nil
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.connectionStatus = .disconnected
+        }
     }
     
     /// Sends a custom "conversation.item.create" event
@@ -156,20 +171,41 @@ class WebRTCManager: NSObject, ObservableObject {
             return
         }
         
-        let sessionUpdate: [String: Any] = [
-            "type": "session.update",
-            "session": [
-                "modalities": ["text", "audio"],  // Enable both text and audio
-                "instructions": systemInstructions,
-                "voice": voice,
-                "input_audio_transcription": [
-                    "model": provider == .openai ? "whisper-1" : "whisper-v3-turbo"
-                ],
-                "turn_detection": [
-                    "type": "server_vad",
+        // Declare sessionUpdate outside of conditional blocks
+        let sessionUpdate: [String: Any]
+        
+        if provider == .outspeed {
+            sessionUpdate = [
+                "type": "session.update",
+                "session": [
+                    "modalities": ["text", "audio"],  // Enable both text and audio
+                    "instructions": systemInstructions,
+                    "voice": voice,
+                    "input_audio_transcription": [
+                        "model": provider == .openai ? "whisper-1" : "whisper-v3-turbo"
+                    ],
+                    "turn_detection": [
+                        "type": "server_vad",
+                        "rms_threshold": 0.0,
+                    ]
                 ]
             ]
-        ]
+        } else {
+            sessionUpdate = [
+                "type": "session.update",
+                "session": [
+                    "modalities": ["text", "audio"],  // Enable both text and audio
+                    "instructions": systemInstructions,
+                    "voice": voice,
+                    "input_audio_transcription": [
+                        "model": provider == .openai ? "whisper-1" : "whisper-v3-turbo"
+                    ],
+                    "turn_detection": [
+                        "type": "server_vad",
+                    ]
+                ]
+            ]
+        }
         
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: sessionUpdate)
@@ -185,7 +221,11 @@ class WebRTCManager: NSObject, ObservableObject {
     
     private func setupPeerConnection() {
         let config = RTCConfiguration()
-        // If needed, configure ICE servers here
+        // Configure ICE servers with public STUN servers
+        config.iceServers = [
+            RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urlStrings: ["stun:stun1.l.google.com:19302"])
+        ]
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         let factory = RTCPeerConnectionFactory()
         peerConnection = factory.peerConnection(with: config, constraints: constraints, delegate: self)
@@ -195,7 +235,7 @@ class WebRTCManager: NSObject, ObservableObject {
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetooth])
-            try audioSession.setMode(.videoChat)
+            try audioSession.setMode(.voiceChat)  // Changed from videoChat to voiceChat for better voice optimization
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("Failed to configure AVAudioSession: \(error)")
@@ -211,7 +251,7 @@ class WebRTCManager: NSObject, ObservableObject {
                 "googEchoCancellation": "true",
                 "googAutoGainControl": "true",
                 "googNoiseSuppression": "true",
-                "googHighpassFilter": "true"
+                "googHighpassFilter": "true",
             ],
             optionalConstraints: nil
         )
@@ -249,22 +289,40 @@ class WebRTCManager: NSObject, ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         
-        // Create session configuration
-        let sessionConfig: [String: Any] = [
-            "model": modelName,
-            "modalities": ["text", "audio"],
-            "instructions": systemInstructions,
-            "voice": voice,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": [
-                "model": "whisper-v3-turbo"
-            ],
-            "turn_detection": [
-                "type": "server_vad"
+        let sessionConfig: [String: Any]
+        if provider == .outspeed {
+            // Create session configuration
+            sessionConfig = [
+                "model": modelName,
+                "modalities": ["text", "audio"],
+                "instructions": systemInstructions,
+                "voice": voice,
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": [
+                    "model": "whisper-v3-turbo"
+                ],
+                "turn_detection": [
+                    "type": "server_vad",
+                    "rms_threshold": 0.0,
+                ]
             ]
-        ]
-        
+        } else {
+            sessionConfig = [
+                "model": modelName,
+                "modalities": ["text", "audio"],
+                "instructions": systemInstructions,
+                "voice": voice,
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": [
+                    "model": "whisper-v3-turbo"
+                ],
+                "turn_detection": [
+                    "type": "server_vad",
+                ]
+            ]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: sessionConfig)
         
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -305,6 +363,7 @@ class WebRTCManager: NSObject, ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/sdp", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        print("[Outspeed] Sending SDP to OpenAI: \(localSdp)")
         request.httpBody = localSdp.data(using: .utf8)
         
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -322,6 +381,8 @@ class WebRTCManager: NSObject, ObservableObject {
                           userInfo: [NSLocalizedDescriptionKey: "Unable to decode SDP"])
         }
         
+        print("[Outspeed] Received SDP from OpenAI: \(answerSdp)")
+
         return answerSdp
     }
     
@@ -335,6 +396,10 @@ class WebRTCManager: NSObject, ObservableObject {
         print("[Outspeed] Connecting to WebSocket URL: \(wsUrl)")
 
         let webSocket = URLSession.shared.webSocketTask(with: url)
+        // Store WebSocket reference for ICE candidate sending
+        self.outspeedWebSocket = webSocket
+        // Clear any pending candidates from previous connection attempts
+        
         print("[Outspeed] WebSocket connection initiated")
         webSocket.resume() // Starts the asynchronous connection process
         
@@ -384,6 +449,10 @@ class WebRTCManager: NSObject, ObservableObject {
                                 if let sdp = json["sdp"] as? String {
                                     Task {
                                         await self.setRemoteDescription(sdp)
+                                        
+                                        // Send any pending ICE candidates after answer is received
+                                        self.sendPendingIceCandidates()
+                                        
                                         continuation.resume() 
                                     }
                                 } else {
@@ -399,7 +468,11 @@ class WebRTCManager: NSObject, ObservableObject {
                                         sdpMLineIndex: Int32(sdpMLineIndex),
                                         sdpMid: sdpMid
                                     )
-                                    self.peerConnection?.add(iceCandidate)
+                                    self.peerConnection?.add(iceCandidate) { error in
+                                        if let error = error {
+                                            print("[Outspeed][WebSocket] Failed to add ICE candidate: \(error)")
+                                        }
+                                    }
                                     receiveMessage() 
                                 } else {
                                     print("[Outspeed][WebSocket] Malformed candidate received.")
@@ -463,6 +536,13 @@ class WebRTCManager: NSObject, ObservableObject {
         
         eventTypeStr = eventType
         
+        // Set flag to batch UI updates
+        isUpdatingUI = true
+        defer { 
+            // Ensure flag is reset even if processing throws an error
+            isUpdatingUI = false
+        }
+        
         switch eventType {
         case "conversation.item.created":
             if let item = eventDict["item"] as? [String: Any],
@@ -475,7 +555,10 @@ class WebRTCManager: NSObject, ObservableObject {
                 let newItem = ConversationItem(id: itemId, role: role, text: text)
                 conversationMap[itemId] = newItem
                 if role == "assistant" || role == "user" {
-                    conversation.append(newItem)
+                    // Create a safe copy of the conversation array to prevent concurrent modification
+                    var updatedConversation = conversation
+                    updatedConversation.append(newItem)
+                    conversation = updatedConversation
                 }
             }
             
@@ -487,8 +570,12 @@ class WebRTCManager: NSObject, ObservableObject {
                 if var convItem = conversationMap[itemId] {
                     convItem.text += delta
                     conversationMap[itemId] = convItem
+                    
+                    // Safe update of the conversation array
                     if let idx = conversation.firstIndex(where: { $0.id == itemId }) {
-                        conversation[idx].text = convItem.text
+                        var updatedConversation = conversation
+                        updatedConversation[idx].text = convItem.text
+                        conversation = updatedConversation
                     }
                 }
             }
@@ -501,8 +588,12 @@ class WebRTCManager: NSObject, ObservableObject {
                 if var convItem = conversationMap[itemId] {
                     convItem.text = transcript
                     conversationMap[itemId] = convItem
+                    
+                    // Safe update of the conversation array
                     if let idx = conversation.firstIndex(where: { $0.id == itemId }) {
-                        conversation[idx].text = transcript
+                        var updatedConversation = conversation
+                        updatedConversation[idx].text = transcript
+                        conversation = updatedConversation
                     }
                 }
             }
@@ -515,8 +606,12 @@ class WebRTCManager: NSObject, ObservableObject {
                 if var convItem = conversationMap[itemId] {
                     convItem.text = transcript
                     conversationMap[itemId] = convItem
+                    
+                    // Safe update of the conversation array
                     if let idx = conversation.firstIndex(where: { $0.id == itemId }) {
-                        conversation[idx].text = transcript
+                        var updatedConversation = conversation
+                        updatedConversation[idx].text = transcript
+                        conversation = updatedConversation
                     }
                 }
             }
@@ -524,6 +619,63 @@ class WebRTCManager: NSObject, ObservableObject {
         default:
             break
         }
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        print("[Outspeed] didGenerate candidate: \(candidate.sdp)")
+        if provider == .outspeed {
+            if let webSocket = outspeedWebSocket, webSocket.state == .running {
+                sendIceCandidate(candidate)
+            } else {
+                // Buffer the candidate for later
+                print("[Outspeed] WebSocket not ready, buffering ICE candidate")
+                pendingIceCandidates.append(candidate)
+            }
+        }
+    }
+    
+    // Helper method to send a single ICE candidate
+    private func sendIceCandidate(_ candidate: RTCIceCandidate) {
+        guard let webSocket = outspeedWebSocket, webSocket.state == .running else {
+            print("[Outspeed] WebSocket not available, cannot send ICE candidate")
+            return
+        }
+        
+        // Format the ICE candidate message
+        let candidateMessage: [String: Any] = [
+            "type": "candidate",
+            "candidate": candidate.sdp,
+            "sdpMid": candidate.sdpMid ?? "",
+            "sdpMLineIndex": Int(candidate.sdpMLineIndex)
+        ]
+        
+        // Send to the WebSocket server
+        guard let candidateData = try? JSONSerialization.data(withJSONObject: candidateMessage),
+              let candidateString = String(data: candidateData, encoding: .utf8) else {
+            print("[Outspeed] Failed to serialize ICE candidate")
+            return
+        }
+        
+        print("[Outspeed] Sending ICE candidate: \(candidateString)")
+        webSocket.send(.string(candidateString)) { error in
+            if let error {
+                print("[Outspeed] Failed to send ICE candidate: \(error)")
+            }
+        }
+    }
+    
+    // Helper method to send all pending ICE candidates
+    private func sendPendingIceCandidates() {
+        print("[Outspeed] Sending \(pendingIceCandidates.count) buffered ICE candidates")
+        guard !pendingIceCandidates.isEmpty else {
+            return
+        }
+        
+        print("[Outspeed] Sending \(pendingIceCandidates.count) buffered ICE candidates")
+        for candidate in pendingIceCandidates {
+            sendIceCandidate(candidate)
+        }
+        pendingIceCandidates.removeAll()
     }
 }
 
@@ -535,11 +687,47 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        print("ICE Connection State changed to: \(newState)")
+        let stateName: String
+        switch newState {
+        case .new:
+            stateName = "new"
+        case .checking:
+            stateName = "checking"
+        case .connected:
+            stateName = "connected"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .connected
+            }
+        case .completed:
+            stateName = "completed"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .connected
+            }
+        case .failed:
+            stateName = "failed"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .disconnected
+            }
+        case .disconnected:
+            stateName = "disconnected"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .disconnected
+            }
+        case .closed:
+            stateName = "closed"
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionStatus = .disconnected
+            }
+        case .count:
+            stateName = "count"
+        @unknown default:
+            stateName = "unknown"
+        }
+        print("ICE Connection State changed to: \(stateName)")
     }
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
+    
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
@@ -554,7 +742,9 @@ extension WebRTCManager: RTCDataChannelDelegate {
         print("Data channel state changed: \(dataChannel.readyState)")
         // Auto-send session.update after channel is open
         if dataChannel.readyState == .open {
-            sendSessionUpdate()
+            DispatchQueue.main.async { [weak self] in
+                self?.sendSessionUpdate()
+            }
         }
     }
     

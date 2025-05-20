@@ -230,6 +230,11 @@ struct OptionsView: View {
                         Text("Outspeed").tag(Provider.outspeed.rawValue)
                     }
                     .pickerStyle(.segmented)
+                    .onChange(of: selectedProvider) { newValue in
+                        let newProvider = Provider(rawValue: newValue) ?? .openai
+                        selectedModel = newProvider.defaultModel
+                        selectedVoice = newProvider.defaultVoice
+                    }
                 }
                 
                 Section(header: Text("API Keys")) {
